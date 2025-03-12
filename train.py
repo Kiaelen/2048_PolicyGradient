@@ -47,7 +47,7 @@ class TrainAgent:
             if not imitation:
                 loss -= torch.log(p[a]) * reward_to_go
             else:
-                target = torch.zeros(p.shape)
+                target = torch.zeros(p.shape).to(dev)
                 target[a] = 1
                 loss += F.mse_loss(p, target)
             reward_to_go -= r
