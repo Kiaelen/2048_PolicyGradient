@@ -16,16 +16,16 @@ class Game:
         self.greedy_dir = 0
         self.end_game = False
         for i in range(initial_cells):
-            self.generate()
+            self.generate(self.game_board)
         
-    def generate(self):
+    def generate(self, board):
         '''Generate number in empty cell'''
-        empty_cells = np.argwhere(self.game_board == 0)
+        empty_cells = np.argwhere(board == 0)
         if len(empty_cells) == 0:
             return
         idx = np.random.choice(len(empty_cells))
         row, col = empty_cells[idx]
-        self.game_board[row, col] = 2 if np.random.random() < 0.9 else 4
+        board[row, col] = 2 if np.random.random() < 0.9 else 4
     
     def get_s(self):
         return torch.tensor(self.game_board, dtype=torch.float32)
@@ -56,20 +56,20 @@ class Game:
                 print(self.game_board[i, j], end="\t")
             print()
     
-    def detect_movable(self):
+    def detect_movable(self, board):
         '''Detect whether game is lost'''
         # Check for empty cells
-        if np.any(self.game_board == 0):
+        if np.any(board == 0):
             return True
         # Check for possible row merges
         for i in range(self.game_size):
             for j in range(self.game_size - 1):
-                if self.game_board[i, j] == self.game_board[i, j+1]:
+                if board[i, j] == board[i, j+1]:
                     return True
         # Check for possible column merges
         for j in range(self.game_size):
             for i in range(self.game_size - 1):
-                if self.game_board[i, j] == self.game_board[i+1, j]:
+                if board[i, j] == board[i+1, j]:
                     return True
         return False
     
@@ -113,7 +113,7 @@ class Game:
                 
             for j in range(left_index, self.game_size): # erase the remaining numbers
                 board[i, j] = 0
-            
+        
         if not a_took:
             if not simulate:
                 self.invalid_moves += 1
@@ -123,17 +123,15 @@ class Game:
                 return DEADGAME
             return MOTIONLESS
         
-        self.invalid_moves = 0
-        
         board = np.rot90(board, k=4-a)
-        if not simulate:
-            self.game_board = board
-        self.generate()
+        self.generate(board)
         
         if not simulate:
+            self.invalid_moves = 0
+            self.game_board = board
             self.moves += 1
         
-        if not self.detect_movable():
+        if not self.detect_movable(board):
             if not simulate:
                 self.end_game = True
             return DEADGAME

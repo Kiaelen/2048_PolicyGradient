@@ -25,11 +25,11 @@ class TrainAgent:
                 s = game.get_s().to(dev)[None, None, ...]
                 p = self.model(s).squeeze()
                 a = torch.multinomial(p, num_samples=1).item()
-                a_greedy = game.get_greedy_a()
                 if not imitation:
                     r = game.step(a)
                     traj.append([s, a, p, r])
                 else:
+                    a_greedy = game.get_greedy_a()
                     a = a if np.random.random() < 0.5 else a_greedy
                     r = game.step(a)
                     traj.append([s, a_greedy, p, r])
