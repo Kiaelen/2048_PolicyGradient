@@ -2,8 +2,8 @@ import numpy as np
 import torch
 import math
 
-MOTIONLESS = -5
-DEADGAME = -20
+MOTIONLESS = -10
+DEADGAME = -50
 INVALID_THRESHOLD = 4
 
 class Game:
