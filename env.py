@@ -4,19 +4,25 @@ import math
 
 MOTIONLESS = -10
 DEADGAME = -50
-INVALID_THRESHOLD = 4
+INVALID_THRESHOLD = 3
 
 class Game:
-    def __init__(self, game_size=4, initial_cells=2):
+    def __init__(self, instance=None, game_size=4, initial_cells=2):
         self.game_size = game_size
-        self.game_board = np.zeros((game_size, game_size), dtype=int)
-        self.score = 0
-        self.moves = 0
-        self.invalid_moves = 0
-        self.greedy_dir = 0
-        self.end_game = False
-        for i in range(initial_cells):
-            self.generate(self.game_board)
+        if instance == None:
+            self.game_board = np.zeros((game_size, game_size), dtype=int)
+            self.score = 0
+            self.moves = 0
+            self.invalid_moves = 0
+            self.end_game = False
+            for _ in range(initial_cells):
+                self.generate(self.game_board)
+        else:
+            self.game_board = instance.game_board
+            self.score = instance.score
+            self.moves = instance.moves
+            self.invalid_moves = instance.invalid_moves
+            self.end_game = instance.end_game
         
     def generate(self, board):
         '''Generate number in empty cell'''
@@ -28,17 +34,20 @@ class Game:
         board[row, col] = 2 if np.random.random() < 0.9 else 4
     
     def get_s(self):
-        return torch.tensor(self.game_board, dtype=torch.float32)
+        board = torch.log(torch.tensor(self.game_board, dtype=torch.float32) + 1)
+        futile = torch.ones(board.shape) * self.invalid_moves
+        return torch.stack((board, futile))
     
     def get_greedy_a(self):
-        randir = self.greedy_dir
-        if self.step(randir, simulate=True) >= 0:
-            return randir
-        elif self.step((randir+1)%4, simulate=True) >= 0:
-            return (randir+1)%4
-        elif self.step((randir+2)%4, simulate=True) >= 0:
-            return (randir+2)%4
-        return (randir+3)%4
+        if np.random.random() < 0.5 and self.step(3, simulate=True) >= 0:
+            return 3
+        elif self.step(0, simulate=True) >= 0:
+            return 0
+        elif self.step(3, simulate=True) >= 0:
+            return 3
+        elif np.random.random() < 0.9 and self.step(2, simulate=True) >= 0:
+            return 2
+        return 1
             
     
     def print(self):
