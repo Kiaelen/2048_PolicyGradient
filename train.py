@@ -10,29 +10,41 @@ from pg_model import PolicyNet
 from tqdm import tqdm
 from torch import optim
 import random
+import inspect
 
 dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-NUM_TRAJ = 25
-NUM_UPDATES = 10
+NUM_TRAJ = 40
+NUM_UPDATES = 8
+HIGH_SCORE = 10000
 
-def get_model(model_type):
-    model = model_type()
+A, B = 0.5, 3e-3
+
+def get_model(model, path=None, entire=False):
+    if inspect.isclass(model):
+        model = model()
+    if path != None:
+        if not entire:
+            model.load_state_dict(torch.load(path, weights_only=True))
+        else:
+            model = torch.load(path, weights_only=False)
     model = model.to(dev)
     opt = optim.AdamW(model.parameters())
     return model, opt
 
 class TrainAgent:
-    def __init__(self, policy, policy_opt, value, value_opt):
-        self.policy, self.policy_opt = policy, policy_opt
-        self.value, self.value_opt = value, value_opt
+    def __init__(self, policy, value, opt, expert_policy=None):
+        self.policy = policy
+        self.value = value
+        self.opt = opt
         self.max_score = 0
+        self.expert_policy = expert_policy
         
-    def collect_trajs(self, num_traj=NUM_TRAJ, offline=False):
+    def collect_trajs(self, num_traj=NUM_TRAJ, offline=False, expert_policy=None):
         trajs = []
         for i in range(num_traj):
-            if not offline:
-                game = random.choice(self.start_s)
+            if i != 0 and not offline:
+                game = Game(random.choice(self.start_s))
             else:
                 game = Game()
                 
@@ -40,7 +52,7 @@ class TrainAgent:
             
             while not game.end_game:
                 if not offline:
-                    if game.score > self.max_score:
+                    if np.random.rand() < B:
                         self.start_s.append(Game(game))
                     s = game.get_s().to(dev)
                     p = self.policy(s[None, ...]).squeeze()
@@ -48,10 +60,20 @@ class TrainAgent:
                     r = game.step(a)
                     traj.append([s, torch.tensor(a).to(dev), p.detach(), torch.tensor(r).to(dev)])
                 else:
-                    copy_game = Game(game)
-                    a = game.get_greedy_a()
-                    game.step(a)
-                    traj.append(copy_game)
+                    if expert_policy == None:
+                        copy_game = Game(game)
+                        if np.random.rand() < A:
+                            traj.append(copy_game)
+                        a = game.get_greedy_a()
+                        game.step(a)
+                    else:
+                        copy_game = Game(game)
+                        if np.random.rand() < A:
+                            traj.append(copy_game)
+                        s = game.get_s(old_ver=True).to(dev)
+                        p = expert_policy(s[None, ...]).squeeze()
+                        a = torch.multinomial(p, num_samples=1).item()
+                        game.step(a)
             if not offline:
                 trajs.append(traj)
             else:
@@ -65,7 +87,7 @@ class TrainAgent:
         loss = 0
         
         if type == "V": # Value loss
-            tot_r = 0
+            tot_r = 0.
             for s, a, pt, r, p, v in traj:
                 tot_r += r
             reward_to_go = tot_r
@@ -135,21 +157,45 @@ class TrainAgent:
         
         return aug_trajs
     
-    def batch_ascent(self, trajs, num_updates=NUM_UPDATES):
+    def compute_rotation_loss(self, trajs):
+        s_, s_rot, rot_dir = [], [], []
+        for traj in trajs:
+            for s, a, p, r in traj:
+                s_.append(s)
+                deg = np.random.randint(1, 4)
+                rot_dir.append(deg)
+                s_rot.append(torch.rot90(s, deg, (1, 2)))
+                
+        s_ = torch.stack(s_)
+        s_rot = torch.stack(s_rot)
+        
+        p_ = self.policy(s_)
+        pr_ = self.policy(s_rot)
+        
+        prs_ = []
+        for i in range(len(pr_)):
+            prs = torch.zeros(4)
+            prs[:4-rot_dir[i]] = pr_[i, rot_dir[i]:]
+            prs[rot_dir[i]:] = pr_[i, :4-rot_dir[i]]
+            prs_.append(prs)
+        
+        prs_ = torch.stack(prs_)
+        
+        loss = F.mse_loss(p_, prs_)
+        return loss
+            
+    def batch_ascent(self, trajs, num_updates=NUM_UPDATES, sym_w=0):
         self.policy.train()
         self.value.train()
         
         for _ in range(num_updates):
             aug_trajs = self.augment(trajs)
             loss = self.compute_batch_loss(aug_trajs)
+            loss += sym_w * self.compute_rotation_loss(trajs)
                 
-            self.policy_opt.zero_grad()
-            self.value_opt.zero_grad()
-            
+            self.opt.zero_grad()
             loss.backward()
-            
-            self.policy_opt.step()
-            self.value_opt.step()
+            self.opt.step()
             
         return loss
     
@@ -168,6 +214,12 @@ class TrainAgent:
         tot_score /= num_traj
         return tot_score
     
+    def collect_rand(self, num_s=5000):
+        start_s = []
+        for _ in range(num_s):
+            start_s.append(Game(rand=True))
+        return start_s
+    
     def train(self, epochs=100, lamda=0.5, epsilon=0.2):
         self.lamda = lamda
         self.epsilon = epsilon
@@ -177,13 +229,26 @@ class TrainAgent:
         
         # Collect offline data
         print("Collecting offline data")
+        num_greedy_s = num_expert_s = num_rand_s = 0
         self.start_s = self.collect_trajs(num_traj=50, offline=True)
-        print(f"Completed with {len(self.start_s)} possible starting states. Start PPO")
+        num_greedy_s = len(self.start_s)
+        if self.expert_policy != None:
+            self.start_s += self.collect_trajs(num_traj=50, offline=True, expert_policy=self.expert_policy)
+            num_expert_s = len(self.start_s) - num_greedy_s
+        
+        self.start_s += self.collect_rand()
+        num_rand_s = len(self.start_s) - num_greedy_s - num_expert_s
+        print(f"Complete with " \
+                + f"{num_greedy_s} greedy trajectory starting states, " \
+                + f"{num_expert_s} expert trajectory starting states " \
+            + f"and {num_rand_s} random starting states\n" \
+            + f"This is {len(self.start_s)} starting states in total")
         
         # PPO
+        print("Start PPO")
         for epoch in tqdm(range(epochs)):
             trajs = self.collect_trajs()
-            loss = self.batch_ascent(trajs)
+            loss = self.batch_ascent(trajs, sym_w=0.2)
             
             loss = -loss.item()
             losses.append(loss)

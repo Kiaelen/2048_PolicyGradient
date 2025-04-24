@@ -2,14 +2,69 @@ import numpy as np
 import torch
 import math
 
-MOTIONLESS = -10
-DEADGAME = -50
+MOTIONLESS = -100
+DEADGAME = -1000
 INVALID_THRESHOLD = 3
+NUM_CHANNEL = 5
+
+RAND_NUM = [0]
+RAND_DIS = []
+LOG_MAX = 12
+
+for i in range(LOG_MAX+1):
+    RAND_NUM.append(2 ** i)
+for i in range(LOG_MAX+1):
+    RAND_DIS.append(2 ** -(i+1))
+RAND_DIS.append(2 ** -(LOG_MAX+1))
+
+def old_get_s(self):
+    board = torch.log(torch.tensor(self.game_board, dtype=torch.float32) + 1)
+    futile = torch.ones(board.shape) * self.invalid_moves
+    max_mask1 = torch.tensor(self.game_board >= (self.game_board.max()), dtype=torch.float32)
+    max_mask2 = torch.tensor(self.game_board >= (self.game_board.max()/4), dtype=torch.float32)
+    max_mask3 = torch.tensor(self.game_board >= (self.game_board.max()/16), dtype=torch.float32)
+    return torch.stack((board, futile, max_mask1, max_mask2, max_mask3))
+
+def new_get_s(self):
+    t_board = torch.tensor(self.game_board, dtype=torch.float32)
+        
+    board = torch.log(t_board + 1)
+    futile = torch.ones(board.shape) * self.invalid_moves
+    
+    max_mask1 = torch.tensor(self.game_board >= (self.game_board.max()), dtype=torch.float32)
+    max_mask2 = torch.tensor(self.game_board >= (self.game_board.max()/4), dtype=torch.float32)
+    max_mask3 = torch.tensor(self.game_board >= (self.game_board.max()/16), dtype=torch.float32)
+    
+    c_copy = torch.zeros(board.shape)
+    c_copy[:, :self.game_size-1] = t_board[:, 1:]
+    c_diff = t_board - c_copy
+    
+    r_copy = torch.zeros(board.shape)
+    r_copy[:self.game_size-1, :] = t_board[1:, :]
+    r_diff = t_board - r_copy
+    
+    return torch.stack((board, futile, c_diff, r_diff, max_mask1, max_mask2, max_mask3))
 
 class Game:
-    def __init__(self, instance=None, game_size=4, initial_cells=2):
+    def __init__(self, instance=None, rand=False, game_size=4, initial_cells=2):
         self.game_size = game_size
-        if instance == None:
+        if rand:
+            while True:
+                self.game_board = np.random.choice(RAND_NUM, size=(game_size, game_size), p=RAND_DIS)
+                if self.detect_movable(self.game_board):
+                    break
+
+            self.score = 0
+            self.moves = 0
+            self.invalid_moves = 0
+            self.end_game = False
+        elif instance != None:
+            self.game_board = instance.game_board.copy()
+            self.score = instance.score
+            self.moves = instance.moves
+            self.invalid_moves = instance.invalid_moves
+            self.end_game = instance.end_game
+        else:
             self.game_board = np.zeros((game_size, game_size), dtype=int)
             self.score = 0
             self.moves = 0
@@ -17,12 +72,6 @@ class Game:
             self.end_game = False
             for _ in range(initial_cells):
                 self.generate(self.game_board)
-        else:
-            self.game_board = instance.game_board
-            self.score = instance.score
-            self.moves = instance.moves
-            self.invalid_moves = instance.invalid_moves
-            self.end_game = instance.end_game
         
     def generate(self, board):
         '''Generate number in empty cell'''
@@ -33,10 +82,11 @@ class Game:
         row, col = empty_cells[idx]
         board[row, col] = 2 if np.random.random() < 0.9 else 4
     
-    def get_s(self):
-        board = torch.log(torch.tensor(self.game_board, dtype=torch.float32) + 1)
-        futile = torch.ones(board.shape) * self.invalid_moves
-        return torch.stack((board, futile))
+    def get_s(self, old_ver=False):
+        if old_ver:
+            return old_get_s(self)
+        return old_get_s(self)
+        
     
     def get_greedy_a(self):
         if np.random.random() < 0.5 and self.step(3, simulate=True) >= 0:
@@ -47,8 +97,7 @@ class Game:
             return 3
         elif np.random.random() < 0.9 and self.step(2, simulate=True) >= 0:
             return 2
-        return 1
-            
+        return 1     
     
     def print(self):
         '''Print game'''
@@ -82,12 +131,21 @@ class Game:
                     return True
         return False
     
-    def step(self, a, simulate=False): # 0 left, cw
+    def get_complementary_score(self, board, empty_score=10):
+        score = 0
+        for i in range(self.game_size):
+            for j in range(self.game_size):
+                score += (board[i, j] == 0) * empty_score
+                score += board[i, j] * (abs(self.game_size / 2 - 0.5 - i) + abs(self.game_size / 2 - 0.5 - j))
+        return score
+    
+    def step(self, a, simulate=False, cplm_para=1): # 0 left, cw
         '''Take an action'''
         if self.end_game:
             return DEADGAME
         
         r = 0
+        # ini_cplm = self.get_complementary_score(self.game_board)
         a_took = False # can move in this direction
         
         board = np.rot90(self.game_board.copy(), k=a)
@@ -98,7 +156,7 @@ class Game:
             left_element = 0 # possible merge element
                   
             for j in range(self.game_size):
-                if board[i, j] == 0: # nonempty cell
+                if board[i, j] == 0: # empty cell
                     zero_deteced = True
                     continue
                 if zero_deteced == True:
@@ -147,7 +205,10 @@ class Game:
         
         if not simulate:
             self.score += r
-            
-        return r
+        
+        # aft_cplm = self.get_complementary_score(board)
+        r_cplm = 0
+        
+        return r + cplm_para * r_cplm
     
         
